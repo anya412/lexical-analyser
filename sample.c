@@ -2,7 +2,6 @@
  *  File name   : sample.c
  *  Description : a sample C program to demonstrate
  *                the working of the lexical analyser.
- *
 ************************************************************************/
 
 #include<stdio.h>
@@ -39,4 +38,5 @@ void sample()
         printf("None of the options");
     }
     return;
+
 }
