@@ -19,23 +19,75 @@
  *                - is_real_number()
  *                - is_pre_processor()
  *                - is_identifier()
+ *                - lexer_state_init()
  *                - tokenize_line()
- * 
  ***********************************************************************/
 
 #include "main.h"
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdio.h>
+
+/*----------------------------------------------------------------------
+ *  Constants
+ *--------------------------------------------------------------------*/
+#define MULTI_BUF_INIT 512   /* initial capacity of the multi-line buffer  */
 
 /*----------------------------------------------------------------------
  *  Function Declarations
  *--------------------------------------------------------------------*/
-int is_integer(char *);
-int is_delim(char *);
-int is_hex_octal(char *);
-int is_keyword(char *);
-int is_operator(char *);
-int is_real_number(char *);
-int is_pre_processor(char *);
-int is_identifier(char *);
+int  is_integer(char *);
+int  is_delim(char *);
+int  is_hex_octal(char *);
+int  is_keyword(char *);
+int  is_operator(char *);
+int  is_real_number(char *);
+int  is_pre_processor(char *);
+int  is_identifier(char *);
+
+/*----------------------------------------------------------------------
+ *  LexerState – caller-owned struct that replaces all static locals.
+ *  Initialise once per source file with lexer_state_init(); free
+ *  the internal buffer with lexer_state_free() when done.
+ *--------------------------------------------------------------------*/
+void lexer_state_init(LexerState *ls)
+{
+    ls->multi_flag   = 0;
+    ls->string_flag  = 0;
+    ls->m_index      = 0;
+    ls->s_index      = 0;
+    ls->buf_capacity = MULTI_BUF_INIT;
+    ls->buffer_multi = (char *)malloc(ls->buf_capacity);
+    if (ls->buffer_multi)
+        ls->buffer_multi[0] = '\0';
+}
+
+void lexer_state_free(LexerState *ls)
+{
+    free(ls->buffer_multi);
+    ls->buffer_multi = NULL;
+}
+
+/*----------------------------------------------------------------------
+ *  Internal helper: append one character to ls->buffer_multi, growing
+ *  the buffer if necessary.  Returns 0 on allocation failure.
+ *--------------------------------------------------------------------*/
+static int buf_append(LexerState *ls, char c)
+{
+    /* Reserve one byte for the NUL terminator */
+    if (ls->m_index + 1 >= ls->buf_capacity)
+    {
+        int new_cap = ls->buf_capacity * 2;
+        char *tmp   = (char *)realloc(ls->buffer_multi, new_cap);
+        if (!tmp)
+            return 0;
+        ls->buffer_multi  = tmp;
+        ls->buf_capacity  = new_cap;
+    }
+    ls->buffer_multi[ls->m_index++] = c;
+    return 1;
+}
 
 /*----------------------------------------------------------------------
  *  Check if token is an integer constant
@@ -55,7 +107,7 @@ int is_integer(char *str)
 
     while (str[i] != '\0')
     {
-        if (!isdigit(str[i]))
+        if (!isdigit((unsigned char)str[i]))
             return 0;
         i++;
     }
@@ -68,8 +120,9 @@ int is_integer(char *str)
 int is_delim(char *str)
 {
     const char *delim[] = {",", ";", "(", ")", "[", "]", "{", "}", ":"};
+    int len = (int)(sizeof(delim) / sizeof(delim[0]));
 
-    for (int i = 0; i < 9; i++)
+    for (int i = 0; i < len; i++)
     {
         if (strcmp(delim[i], str) == 0)
             return 1;
@@ -85,17 +138,21 @@ int is_hex_octal(char *str)
     if (str == NULL || str[0] == '\0')
         return 0;
 
+    /* Hexadecimal: 0x... or 0X... */
     if (str[0] == '0' && (str[1] == 'x' || str[1] == 'X'))
     {
+        if (str[2] == '\0')          /* bare "0x" is not valid */
+            return 0;
         for (int i = 2; str[i] != '\0'; i++)
         {
-            if (!isxdigit(str[i]))
+            if (!isxdigit((unsigned char)str[i]))
                 return 0;
         }
         return 1;
     }
 
-    if (str[0] == '0')
+    /* Octal: leading 0 followed by octal digits */
+    if (str[0] == '0' && str[1] != '\0')
     {
         for (int i = 1; str[i] != '\0'; i++)
         {
@@ -118,9 +175,11 @@ int is_keyword(char *str)
         "long", "const", "volatile", "for", "while", "do", "goto", "break",
         "continue", "if", "else", "switch", "case", "default", "auto",
         "register", "static", "extern", "struct", "union", "enum",
-        "typedef", "void", "return", "sizeof"};
+        "typedef", "void", "return", "sizeof"
+    };
 
-    for (int i = 0; i < (int)(sizeof(keywords) / sizeof(keywords[0])); i++)
+    int len = (int)(sizeof(keywords) / sizeof(keywords[0]));
+    for (int i = 0; i < len; i++)
     {
         if (strcmp(str, keywords[i]) == 0)
             return 1;
@@ -134,11 +193,27 @@ int is_keyword(char *str)
 int is_operator(char *str)
 {
     const char *operators[] = {
-        "+", "-", "*", "/", "=", "==", "!=", "<", ">", "<=", ">=", "++",
-        "--", "&&", "||", "&", "|", "^", "~", "!", "%", "<<", ">>",
-        "+=", "-=", ".", "->"};
+        /* arithmetic */
+        "+", "-", "*", "/", "%",
+        /* relational */
+        "==", "!=", "<", ">", "<=", ">=",
+        /* assignment */
+        "=",
+        /* compound assignment – were missing before */
+        "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",
+        /* increment / decrement */
+        "++", "--",
+        /* logical */
+        "&&", "||", "!",
+        /* bitwise */
+        "&", "|", "^", "~", "<<", ">>",
+        /* member access */
+        ".", "->",
+        /* ternary */
+        "?"
+    };
 
-    int len = sizeof(operators) / sizeof(operators[0]);
+    int len = (int)(sizeof(operators) / sizeof(operators[0]));
     for (int i = 0; i < len; i++)
     {
         if (strcmp(str, operators[i]) == 0)
@@ -154,6 +229,9 @@ int is_real_number(char *str)
 {
     int i = 0, flag = 0, digit_count = 0;
 
+    if (str == NULL || str[0] == '\0') 
+        return 0;
+
     if (str[0] == '-' || str[0] == '+')
         i++;
 
@@ -165,7 +243,7 @@ int is_real_number(char *str)
             if (flag > 1)
                 return 0;
         }
-        else if (isdigit(str[i]))
+        else if (isdigit((unsigned char)str[i]))
             digit_count++;
         else
             return 0;
@@ -181,15 +259,20 @@ int is_real_number(char *str)
  *--------------------------------------------------------------------*/
 int is_pre_processor(char *str)
 {
+    if (str == NULL || str[0] != '#')
+        return 0;
+
     const char *preprocessors[] = {
         "#include", "#define", "#undef", "#ifdef", "#ifndef",
-        "#endif", "#if", "#else", "#elif", "#error", "#pragma", "#line"};
+        "#endif", "#if", "#else", "#elif", "#error", "#pragma", "#line"
+    };
 
-    int len = sizeof(preprocessors) / sizeof(preprocessors[0]);
+    int len = (int)(sizeof(preprocessors) / sizeof(preprocessors[0]));
 
     for (int i = 0; i < len; i++)
     {
-        if (strstr(str, preprocessors[i]) != NULL)
+        size_t klen = strlen(preprocessors[i]);
+        if (strncmp(str, preprocessors[i], klen) == 0)
             return 1;
     }
     return 0;
@@ -200,12 +283,15 @@ int is_pre_processor(char *str)
  *--------------------------------------------------------------------*/
 int is_identifier(char *str)
 {
-    if (!isalpha(str[0]) && str[0] != '_')
+    if (str == NULL || str[0] == '\0')
+        return 0;
+
+    if (!isalpha((unsigned char)str[0]) && str[0] != '_')
         return 0;
 
     for (int i = 1; str[i] != '\0'; i++)
     {
-        if (!isalnum(str[i]) && str[i] != '_')
+        if (!isalnum((unsigned char)str[i]) && str[i] != '_')
             return 0;
     }
 
@@ -213,24 +299,24 @@ int is_identifier(char *str)
 }
 
 /*----------------------------------------------------------------------
- *  Tokenize and classify tokens within a line of source code
+ *  Tokenize and classify tokens within a line of source code.
  *--------------------------------------------------------------------*/
-void tokenize_line(char *line, FILE *fptr_output, TokenStats *token_stats)
+void tokenize_line(char *line, FILE *fptr_output, TokenStats *token_stats,
+                   LexerState *ls)
 {
-    int i = 0;
-    char token[1000];
-    static char buffer_multi[200];
-    static int m_index = 0, s_index = 0;
-    static int multi_flag = 0, string_flag = 0;
+    int  i = 0;
+    char token[1024];
 
     while (line[i] != '\0')
     {
-        if (isspace(line[i]))
+        /* ── whitespace ─────────────────────────────────────────── */
+        if (isspace((unsigned char)line[i]))
         {
             i++;
             continue;
         }
 
+        /* ── single-character delimiter ──────────────────────────── */
         char delim_buf[2] = {line[i], '\0'};
         if (is_delim(delim_buf))
         {
@@ -240,11 +326,11 @@ void tokenize_line(char *line, FILE *fptr_output, TokenStats *token_stats)
             continue;
         }
 
+        /* ── preprocessor directive (whole rest of line) ─────────── */
         if (line[i] == '#')
         {
             int j = 0;
-            token[j++] = line[i++];
-            while (line[i] != '\0' && j < sizeof(token) - 1)
+            while (line[i] != '\0' && j < (int)sizeof(token) - 1)
                 token[j++] = line[i++];
             token[j] = '\0';
 
@@ -256,51 +342,75 @@ void tokenize_line(char *line, FILE *fptr_output, TokenStats *token_stats)
             continue;
         }
 
-        if (line[i] == '"' || string_flag == 1)
+        /* ── string literal (possibly spanning multiple calls) ───── */
+        if (line[i] == '"' || ls->string_flag == 1)
         {
-            buffer_multi[s_index++] = line[i++];
+            if (ls->s_index < ls->buf_capacity - 1)
+                ls->buffer_multi[ls->s_index++] = line[i++];
+            else
+                i++;   /* buffer full – skip character rather than overflow */
+
             while (line[i] != '"' && line[i] != '\0')
-                buffer_multi[s_index++] = line[i++];
+            {
+                if (ls->s_index < ls->buf_capacity - 1)
+                    ls->buffer_multi[ls->s_index++] = line[i];
+                i++;
+            }
 
             if (line[i] == '\0')
             {
-                string_flag = 1;
+                ls->string_flag = 1;
+                ls->buffer_multi[ls->s_index] = '\0';
                 return;
             }
-            buffer_multi[s_index++] = line[i++];
-            buffer_multi[s_index] = '\0';
-            fprintf(fptr_output, "%s is a string literal\n", buffer_multi);
-            s_index = 0;
-            string_flag = 0;
+
+            /* closing '"' */
+            if (ls->s_index < ls->buf_capacity - 1)
+                ls->buffer_multi[ls->s_index++] = line[i++];
+            else
+                i++;
+
+            ls->buffer_multi[ls->s_index] = '\0';
+            fprintf(fptr_output, "%s is a string literal\n", ls->buffer_multi);
+            ls->s_index     = 0;
+            ls->string_flag = 0;
             token_stats->string_literals++;
             continue;
         }
 
-        if ((line[i] == '/' && line[i + 1] == '*') || multi_flag == 1)
+        /* ── multi-line comment (possibly spanning multiple calls) ── */
+        if ((line[i] == '/' && line[i + 1] == '*') || ls->multi_flag == 1)
         {
-            while (line[i] != '\0' && !(line[i] == '*' && line[i + 1] == '/'))
-                buffer_multi[m_index++] = line[i++];
+            while (line[i] != '\0' &&
+                   !(line[i] == '*' && line[i + 1] == '/'))
+            {
+                buf_append(ls, line[i++]);
+            }
 
             if (line[i] == '\0')
             {
-                multi_flag = 1;
+                ls->multi_flag = 1;
+                ls->buffer_multi[ls->m_index] = '\0';
                 return;
             }
 
-            buffer_multi[m_index++] = line[i++];
-            buffer_multi[m_index++] = line[i++];
-            buffer_multi[m_index] = '\0';
-            fprintf(fptr_output, "%s is a multi-line comment\n", buffer_multi);
+            /* consume closing "*/" */
+            buf_append(ls, line[i++]);
+            buf_append(ls, line[i++]);
+            ls->buffer_multi[ls->m_index] = '\0';
+            fprintf(fptr_output, "%s is a multi-line comment\n",
+                    ls->buffer_multi);
             token_stats->multi_line++;
-            m_index = 0;
-            multi_flag = 0;
+            ls->m_index    = 0;
+            ls->multi_flag = 0;
             continue;
         }
 
+        /* ── single-line comment ─────────────────────────────────── */
         if (line[i] == '/' && line[i + 1] == '/')
         {
             int j = 0;
-            while (line[i] != '\0')
+            while (line[i] != '\0' && j < (int)sizeof(token) - 1)
                 token[j++] = line[i++];
             token[j] = '\0';
             fprintf(fptr_output, "%s is a single line comment\n", token);
@@ -308,10 +418,12 @@ void tokenize_line(char *line, FILE *fptr_output, TokenStats *token_stats)
             return;
         }
 
-        if (isalpha(line[i]) || line[i] == '_')
+        /* ── keyword or identifier ───────────────────────────────── */
+        if (isalpha((unsigned char)line[i]) || line[i] == '_')
         {
             int j = 0;
-            while ((isalnum(line[i]) || line[i] == '_') && j < sizeof(token) - 1)
+            while ((isalnum((unsigned char)line[i]) || line[i] == '_') &&
+                   j < (int)sizeof(token) - 1)
                 token[j++] = line[i++];
             token[j] = '\0';
 
@@ -328,14 +440,21 @@ void tokenize_line(char *line, FILE *fptr_output, TokenStats *token_stats)
             continue;
         }
 
-        if (isdigit(line[i]) || (line[i] == '+' || line[i] == '-'))
+        /* ── numeric literal (integer, real, hex, octal) ────────────
+         *  They are handled by the operator block below.
+         *  is_real_number() and is_integer() already accept an
+         *  optional leading sign internally, but we only enter this
+         *  branch on an unambiguous digit start.
+         * ─────────────────────────────────────────────────────────── */
+        if (isdigit((unsigned char)line[i]))
         {
             int j = 0;
-            token[j++] = line[i++];
-            while (line[i] != '\0' && j < sizeof(token) - 1 &&
-                   (isalnum(line[i]) || line[i] == '.' || line[i] == 'x' || line[i] == 'X'))
+            while (line[i] != '\0' && j < (int)sizeof(token) - 1 &&
+                   (isalnum((unsigned char)line[i]) ||
+                    line[i] == '.' ||
+                    line[i] == 'x' ||
+                    line[i] == 'X'))
                 token[j++] = line[i++];
-
             token[j] = '\0';
 
             if (is_real_number(token))
@@ -343,19 +462,20 @@ void tokenize_line(char *line, FILE *fptr_output, TokenStats *token_stats)
                 fprintf(fptr_output, "%s is a real number\n", token);
                 token_stats->real_numbers++;
             }
-            else if (is_integer(token))
-            {
-                fprintf(fptr_output, "%s is an integer\n", token);
-                token_stats->integers++;
-            }
             else if (is_hex_octal(token))
             {
                 fprintf(fptr_output, "%s is a hex or octal number\n", token);
                 token_stats->hex_octal++;
             }
+            else if (is_integer(token))
+            {
+                fprintf(fptr_output, "%s is an integer\n", token);
+                token_stats->integers++;
+            }
             continue;
         }
 
+        /* ── character literal ───────────────────────────────────── */
         if (line[i] == '\'')
         {
             int j = 0;
@@ -379,30 +499,50 @@ void tokenize_line(char *line, FILE *fptr_output, TokenStats *token_stats)
             continue;
         }
 
-        if (strchr("=<>!&|+-*/%.~->^", line[i]))
+        /* ── operator ────────────────────────────────────────────────
+         *  Try three-character, two-character, then one-character
+         *  matches so that e.g. ">>=" is preferred over ">>" or ">".
+         * ─────────────────────────────────────────────────────────── */
+        if (strchr("=<>!&|+-*/%.~^?", line[i]))
         {
-            char op[3] = {line[i], line[i + 1], '\0'};
-
-            if (is_operator(op))
+            /* try 3-char first (e.g. >>=, <<=) */
+            if (line[i + 1] != '\0' && line[i + 2] != '\0')
             {
-                fprintf(fptr_output, "%s is an operator\n", op);
-                token_stats->operators++;
-                i += 2;
-                continue;
-            }
-            else
-            {
-                op[1] = '\0';
-                if (is_operator(op))
+                char op3[4] = {line[i], line[i + 1], line[i + 2], '\0'};
+                if (is_operator(op3))
                 {
-                    fprintf(fptr_output, "%s is an operator\n", op);
+                    fprintf(fptr_output, "%s is an operator\n", op3);
                     token_stats->operators++;
-                    i++;
+                    i += 3;
                     continue;
                 }
             }
+
+            /* try 2-char */
+            if (line[i + 1] != '\0')
+            {
+                char op2[3] = {line[i], line[i + 1], '\0'};
+                if (is_operator(op2))
+                {
+                    fprintf(fptr_output, "%s is an operator\n", op2);
+                    token_stats->operators++;
+                    i += 2;
+                    continue;
+                }
+            }
+
+            /* try 1-char */
+            char op1[2] = {line[i], '\0'};
+            if (is_operator(op1))
+            {
+                fprintf(fptr_output, "%s is an operator\n", op1);
+                token_stats->operators++;
+                i++;
+                continue;
+            }
         }
 
+        /* ── unknown character ───────────────────────────────────── */
         fprintf(fptr_output, "%c is unknown\n", line[i]);
         i++;
     }
